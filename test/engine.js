@@ -148,28 +148,28 @@ describe('engine', () => {
       engine = new Engine({
         allowFullConfiguration: true,
         engineConfig: {
-          apiKey: "faked",
+          apiKey: 'faked',
           origins: [
             {
-              name: "defaultOrigin",
+              name: 'defaultOrigin',
               http: {
-                url: 'http://127.0.0.1:' + defaultPort + "/graphql"
+                url: `http://127.0.0.1:${defaultPort}/graphql`
               }
             },
             {
-              name: "testOrigin",
+              name: 'testOrigin',
               http: {
-                url: 'http://127.0.0.1:' + testPort + "/test/graphql"
+                url: `http://127.0.0.1:${testPort}/graphql`
               }
             }
           ],
           frontends: [
             {
-              host: "127.0.0.1",
+              host: '127.0.0.1',
               port: 3000,
               endpointMap: {
-                "/graphql" : "defaultOrigin",
-                "/test/graphql" : "testOrigin"
+                '/graphql' : 'defaultOrigin',
+                '/test/graphql' : 'testOrigin',
               }
             }
           ],
@@ -221,8 +221,8 @@ describe('engine', () => {
 
     it('accepts configuration of overridden headers', async () => {
       const overrideRequestHeaders = {
-        "Host": "example.com",
-        "X-Does-Not-Exist": "huehue",
+        'Host': 'example.com',
+        'X-Does-Not-Exist': 'huehue',
       };
       engine = new Engine({
         graphqlPort: 1,
