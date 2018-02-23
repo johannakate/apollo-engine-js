@@ -3,6 +3,7 @@ const express = require('express');
 const {graphqlExpress} = require('apollo-server-express');
 const bodyParser = require('body-parser');
 const {createServer} = require('net');
+const {Writable} = require('stream');
 
 const {assert} = require('chai');
 const sinon = require('sinon');
@@ -260,15 +261,16 @@ describe('engine', () => {
       assert.strictEqual(userSpecifiedUrl, engine.originParams.http.url);
     });
 
-    it('can be configured to use a custom default logger', async () => {
-      const errorLogger = sinon.stub();
-      const defaultLogger = sinon.spy();
+    it.only('can be configured to use a custom default logger', async () => {
+      let written = false;
+      const proxyStdoutStream = new Writable({
+        write(chunk, encoding, callback) {
+          written = true;
+        }
+      });
       engine = new Engine({
         graphqlPort: 1,
-        logger: {
-          error: errorLogger,
-          log: defaultLogger
-        },
+        proxyStdoutStream,
         engineConfig: {
           reporting: {
             disabled: true
@@ -277,7 +279,7 @@ describe('engine', () => {
       });
 
       await engine.start();
-      assert(defaultLogger.calledWith({ proxy: sinon.match.object }));
+      assert(written);
     });
   });
 
@@ -311,7 +313,7 @@ describe('engine', () => {
     it('is non-invasive on invalid config', async () => {
       setupEngine();
       engine.startupTimeout = 100;
-      engine.config.logging.level = 'glurp';
+      engine.config.logging.level = 'invalid';
 
       engine.on('error', (err) => {
         assert.match(err, /Engine crashed due to invalid configuration/);

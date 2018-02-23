@@ -64,15 +64,6 @@ export interface OriginConfig extends OriginParams {
     http?: OriginHttpConfig
 }
 
-export interface LogData {
-    proxy: any
-}
-
-export interface Logger {
-    error(data: any): void;
-    log(data: LogData): void;
-}
-
 export interface EngineConfig {
     apiKey: string,
     origins?: OriginConfig[],
@@ -133,20 +124,22 @@ export interface SideloadConfig {
     // Milliseconds to wait for the proxy binary to start; set to <=0 to wait forever.
     // If not set, defaults to 5000ms.
     startupTimeout?: number,
-    origin?: OriginParams
-    frontend?: FrontendParams
-    logger?: Logger,
+    origin?: OriginParams,
+    frontend?: FrontendParams,
+    proxyStdoutStream?: NodeJS.WritableStream,
+    proxyStderrStream?: NodeJS.WritableStream,
 }
 
 export class Engine extends EventEmitter {
     private child: ChildProcess | null;
-    private logger: Logger;
+    private proxyStdoutStream?: NodeJS.WritableStream;
+    private proxyStderrStream?: NodeJS.WritableStream;
     private graphqlPort?: number;
     private allowFullConfiguration: boolean;
     private binary: string;
     private config: string | EngineConfig;
     private middlewareParams: MiddlewareParams;
-    private running: Boolean;
+    private running: boolean;
     private startupTimeout: number;
     private originParams: OriginParams;
     private frontendParams: FrontendParams;
@@ -166,11 +159,11 @@ export class Engine extends EventEmitter {
         this.allowFullConfiguration = config.allowFullConfiguration || false;
         this.originParams = config.origin || {};
         this.frontendParams = config.frontend || {};
-        // Custom logger
-        if (config.logger) {
-            this.logger = config.logger;
-        } else {
-            this.logger = console;
+        if (config.proxyStdoutStream) {
+            this.proxyStdoutStream = config.proxyStdoutStream;
+        }
+        if (config.proxyStderrStream) {
+            this.proxyStderrStream = config.proxyStderrStream;
         }
 
         if (config.graphqlPort) {
@@ -215,7 +208,6 @@ export class Engine extends EventEmitter {
         let config = this.config;
         const endpoint = this.middlewareParams.endpoint;
         const graphqlPort = this.graphqlPort;
-        const logger = this.logger;
 
         if (typeof config === 'string') {
             config = JSON.parse(readFileSync(config as string, 'utf8') as string);
@@ -263,19 +255,34 @@ export class Engine extends EventEmitter {
         const spawnChild = () => {
             let childConfigJson = JSON.stringify(childConfig) + '\n';
 
+            // We want to write to engineproxy's stdin and read from its special
+            // listening reporter fd 3 (which we tell it about with an env
+            // var). We let it write directly to our stdout and stderr (unless
+            // the user passes in their own output streams) so we don't spend
+            // CPU copying output around (and if we crash for some reason,
+            // engineproxy's output still gets seen).
+            //
+            // We considered having stdout and stderr always wrapped with a
+            // prefix. We used to do this before we switched to JSON but
+            // apparently it was slow:
+            // https://github.com/apollographql/apollo-engine-js/pull/50#discussion_r153961664
+            // Users can use proxyStd*Stream to do this themselves, and we can
+            // make it easier if it's popular.
+            const stdio = ['pipe', 'inherit', 'inherit', 'pipe'];
+
+            // If we are provided writable streams, ask child_process to create
+            // a pipe which we will pipe to them. (We could put the streams
+            // directly in `stdio` but this only works for pipes based directly
+            // on files.)
+            if (this.proxyStdoutStream) {
+                stdio[1] = 'pipe';
+            }
+            if (this.proxyStderrStream) {
+                stdio[2] = 'pipe';
+            }
+
             const child = spawn(this.binary, ['-config=stdin'], {
-                // We want to write to engineproxy's stdin and read from its
-                // special listening reporter fd 3 (which we tell it about with
-                // an env var). We let it write directly to our stdout and stderr.
-                //
-                // TODO: Should we prepend something to engineproxy
-                //       stdout/stderr to mark it as from engine, instead of
-                //       just letting the subprocess inherit our fds? We used to
-                //       do this before we switched to JSON in
-                //       https://github.com/apollographql/apollo-engine-js/pull/50
-                //       but apparently it was slow:
-                //       https://github.com/apollographql/apollo-engine-js/pull/50#discussion_r153961664
-                stdio: ['pipe', 'inherit', 'inherit', 'pipe'],
+                stdio,
                 env: Object.assign({}, process.env, {
                     'LISTENING_REPORTER_FD': '3',
                 }),
@@ -284,6 +291,14 @@ export class Engine extends EventEmitter {
 
             // Feed config into process:
             child.stdin.write(childConfigJson);
+
+            // Hook up custom logging streams, if provided.
+            if (this.proxyStdoutStream) {
+                child.stdout.pipe(this.proxyStdoutStream);
+            }
+            if (this.proxyStderrStream) {
+                child.stderr.pipe(this.proxyStderrStream);
+            }
 
             let listeningAddress = '';
             child.stdio[3].on('data', (chunk) => {
@@ -310,10 +325,10 @@ export class Engine extends EventEmitter {
                 }
 
                 if (code != null) {
-                    logger.error(`Engine crashed unexpectedly with code: ${code}`);
+                    this.emitRestarting(`Engine crashed unexpectedly with code: ${code}`);
                 }
                 if (signal != null) {
-                    logger.error(`Engine was killed unexpectedly by signal: ${signal}`);
+                    this.emitRestarting(`Engine was killed unexpectedly by signal: ${signal}`);
                 }
                 spawnChild();
             });
@@ -378,5 +393,12 @@ export class Engine extends EventEmitter {
             });
             childRef.kill();
         });
+    }
+
+    private emitRestarting(error: string) {
+        if (!this.emit('restarting', new Error(error))) {
+            // No listeners; default to console.error.
+            console.error(error);
+        }
     }
 }
