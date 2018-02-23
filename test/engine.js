@@ -311,7 +311,7 @@ describe('engine', () => {
     it('is non-invasive on invalid config', async () => {
       setupEngine();
       engine.startupTimeout = 100;
-      engine.config.logging.level = 'invalid';
+      engine.config.logging.level = 'glurp';
 
       engine.on('error', (err) => {
         assert.match(err, /Engine crashed due to invalid configuration/);

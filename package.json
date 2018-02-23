@@ -23,8 +23,7 @@
     "npm": ">=4.0"
   },
   "dependencies": {
-    "request": "^2.81.0",
-    "stream-json": "^0.5.2"
+    "request": "^2.81.0"
   },
   "optionalDependencies": {
     "apollo-engine-binary-darwin": "0.2018.2-73-gff3ac4f70",

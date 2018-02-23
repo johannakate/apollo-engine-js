@@ -4,9 +4,6 @@ import {readFileSync} from 'fs';
 import {EventEmitter} from 'events';
 import {parse as urlParser} from 'url';
 
-// Typings are not available
-const streamJsonObjects = require('stream-json/utils/StreamJsonObjects');
-
 import {
     MiddlewareParams,
     makeMicroMiddleware,
@@ -227,20 +224,6 @@ export class Engine extends EventEmitter {
         // Customize configuration:
         const childConfig = Object.assign({}, config as EngineConfig);
 
-        // Logging format _must_ be JSON to stdout
-        if (!childConfig.logging) {
-            childConfig.logging = {}
-        } else {
-            if (childConfig.logging.format && childConfig.logging.format !== 'JSON') {
-                logger.error(`Invalid logging format: ${childConfig.logging.format}, overridden to JSON.`);
-            }
-            if (childConfig.logging.destination && childConfig.logging.destination !== 'STDOUT') {
-                logger.error(`Invalid logging destination: ${childConfig.logging.format}, overridden to STDOUT.`);
-            }
-        }
-        childConfig.logging.format = 'JSON';
-        childConfig.logging.destination = 'STDOUT';
-
         // Inject frontend, that we will route
         const frontend = Object.assign({
             host: '127.0.0.1',
@@ -278,68 +261,39 @@ export class Engine extends EventEmitter {
         }
 
         const spawnChild = () => {
-            // If logging >INFO, still log at info, then filter in node:
-            // This is because startup notifications are at INFO level.
-            let logLevelFilter: any;
-            const logLevel = childConfig.logging!.level;
-            if (logLevel) {
-                if (logLevel.match(/^warn(ing)?$/i)) {
-                    childConfig.logging!.level = 'info';
-                    logLevelFilter = /^(warn(ing)?|error|fatal)$/;
-                } else if (logLevel.match(/^error$/i)) {
-                    childConfig.logging!.level = 'info';
-                    logLevelFilter = /^(error|fatal)$/;
-                } else if (logLevel.match(/^fatal$/i)) {
-                    childConfig.logging!.level = 'info';
-                    logLevelFilter = /^fatal$/;
-                }
-            }
             let childConfigJson = JSON.stringify(childConfig) + '\n';
 
-            const child = spawn(this.binary, ['-config=stdin']);
+            const child = spawn(this.binary, ['-config=stdin'], {
+                // We want to write to engineproxy's stdin and read from its
+                // special listening reporter fd 3 (which we tell it about with
+                // an env var). We let it write directly to our stdout and stderr.
+                //
+                // TODO: Should we prepend something to engineproxy
+                //       stdout/stderr to mark it as from engine, instead of
+                //       just letting the subprocess inherit our fds? We used to
+                //       do this before we switched to JSON in
+                //       https://github.com/apollographql/apollo-engine-js/pull/50
+                //       but apparently it was slow:
+                //       https://github.com/apollographql/apollo-engine-js/pull/50#discussion_r153961664
+                stdio: ['pipe', 'inherit', 'inherit', 'pipe'],
+                env: Object.assign({}, process.env, {
+                    'LISTENING_REPORTER_FD': '3',
+                }),
+            });
             this.child = child;
-
-            const logStream = streamJsonObjects.make();
-            logStream.output.on('data', (logData: any) => {
-                const logRecord = logData.value;
-
-                // Look for message indicating successful startup:
-                if (logRecord.msg === 'Started HTTP server.') {
-                    const address = logRecord.address;
-                    this.middlewareParams.uri = `http://${address}`;
-
-                    // Notify proxy has started:
-                    this.emit('start');
-
-                    // If we hacked the log level, revert:
-                    if (logLevelFilter) {
-                        childConfig.logging!.level = logLevel;
-                        childConfigJson = JSON.stringify(childConfig) + '\n';
-                        child.stdin.write(childConfigJson);
-
-                        // Remove the filter after the child has had plenty of time to reload the config:
-                        setTimeout(() => {
-                            logLevelFilter = null;
-                        }, 1000);
-                    }
-                }
-
-                // Print log message:
-                if (!logLevelFilter || !logRecord.level || logRecord.level.match(logLevelFilter)) {
-                    logger.log({proxy: logRecord});
-                }
-            });
-
-            logStream.input.on('error', () => {
-                // We received non-json output, dump it to stderr:
-                logger.error(logStream.input._buffer);
-            });
-            // Connect log hooks:
-            child.stdout.pipe(logStream.input);
-            child.stderr.pipe(process.stderr);
 
             // Feed config into process:
             child.stdin.write(childConfigJson);
+
+            let listeningAddress = '';
+            child.stdio[3].on('data', (chunk) => {
+                listeningAddress += chunk.toString();
+            });
+            child.stdio[3].on('end', () => {
+                this.middlewareParams.uri = `http://${listeningAddress}`;
+                // Notify that proxy has started.
+                this.emit('start');
+            });
 
             // Connect shutdown hooks:
             child.on('exit', (code, signal) => {
@@ -376,7 +330,7 @@ export class Engine extends EventEmitter {
                         this.child.kill('SIGKILL');
                         this.child = null;
                     }
-                    return reject(Error('timed out'));
+                    return reject(Error('engineproxy timed out'));
                 }, this.startupTimeout);
             }
 
@@ -384,7 +338,7 @@ export class Engine extends EventEmitter {
                 clearTimeout(cancelTimeout);
                 const port = urlParser(this.middlewareParams.uri).port;
                 if (!port) {
-                    return reject('unknown url');
+                    return reject('engineproxy url is bad');
                 }
                 resolve(parseInt(port, 10));
             });
